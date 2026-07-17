@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Yagi - アクション倉庫番</title>
 <style>
   :root {
@@ -16,7 +16,7 @@
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
-    height: 100%;
+    min-height: 100%;
     background: radial-gradient(circle at 50% 0%, #2b2138 0%, var(--bg) 70%);
     color: var(--text);
     font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
@@ -25,6 +25,8 @@
     justify-content: center;
     -webkit-user-select: none;
     user-select: none;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
   }
   #game-wrap {
     display: flex;
@@ -32,6 +34,8 @@
     align-items: center;
     gap: 12px;
     padding: 16px;
+    width: 100%;
+    max-width: 680px;
   }
   #hud {
     display: flex;
@@ -67,8 +71,11 @@
     background: #14101b;
     border-radius: 14px;
     box-shadow: 0 10px 40px rgba(0,0,0,0.5);
-    max-width: 100%;
+    width: 100%;
+    height: auto;
+    max-width: 640px;
     touch-action: none;
+    image-rendering: auto;
   }
   #hint {
     color: var(--muted);
@@ -85,6 +92,70 @@
     font-size: 12px;
     color: var(--text);
   }
+
+  /* ---- タッチ操作 D-pad ---- */
+  #touch-controls {
+    display: none;               /* 既定は非表示（PC） */
+    width: 100%;
+    max-width: 460px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 4px 8px 12px;
+    touch-action: none;
+  }
+  #dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 62px);
+    grid-template-rows: repeat(3, 62px);
+    gap: 6px;
+  }
+  .pad-btn {
+    background: var(--panel);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 12px;
+    color: var(--text);
+    font-size: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+    user-select: none;
+    touch-action: none;
+    -webkit-user-select: none;
+  }
+  .pad-btn:active, .pad-btn.pressed {
+    background: var(--accent);
+    color: #241b2e;
+    transform: translateY(1px);
+  }
+  #btn-up    { grid-column: 2; grid-row: 1; }
+  #btn-left  { grid-column: 1; grid-row: 2; }
+  #btn-right { grid-column: 3; grid-row: 2; }
+  #btn-down  { grid-column: 2; grid-row: 3; }
+  #pad-center { grid-column: 2; grid-row: 2; opacity: 0.35; }
+  #btn-restart {
+    background: var(--panel);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 14px;
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 700;
+    padding: 16px 20px;
+    min-width: 76px;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+    touch-action: none;
+  }
+  #btn-restart:active { background: var(--danger); color: #241b2e; }
+
+  /* タッチ端末では D-pad を表示、キーボード用ヒントは切替 */
+  #hint .touch-hint { display: none; }   /* 既定（PC）は非表示 */
+  @media (pointer: coarse) {
+    #touch-controls { display: flex; }
+    #hint .kbd-hint { display: none; }
+    #hint .touch-hint { display: inline; }
+  }
 </style>
 </head>
 <body>
@@ -96,8 +167,19 @@
     <div class="stat"><div class="label">ライフ</div><div class="value" id="stat-lives">♥♥♥</div></div>
   </div>
   <canvas id="canvas" width="640" height="480"></canvas>
+  <div id="touch-controls">
+    <div id="dpad">
+      <div class="pad-btn" id="btn-up" data-key="arrowup">▲</div>
+      <div class="pad-btn" id="btn-left" data-key="arrowleft">◀</div>
+      <div class="pad-btn" id="pad-center">🐐</div>
+      <div class="pad-btn" id="btn-right" data-key="arrowright">▶</div>
+      <div class="pad-btn" id="btn-down" data-key="arrowdown">▼</div>
+    </div>
+    <div id="btn-restart">やり直し<br>(R)</div>
+  </div>
   <div id="hint">
-    <kbd>←↑↓→</kbd> / <kbd>WASD</kbd> 移動　<kbd>R</kbd> ステージやり直し　<kbd>Enter</kbd> / <kbd>Space</kbd> 決定<br>
+    <span class="kbd-hint"><kbd>←↑↓→</kbd> / <kbd>WASD</kbd> 移動　<kbd>R</kbd> ステージやり直し　<kbd>Enter</kbd> / <kbd>Space</kbd> 決定<br></span>
+    <span class="touch-hint">画面のボタンで移動　画面タップでスタート／決定<br></span>
     箱（俵）を押してすべての目標に入れよう。ヤギは押しっぱなしで走れる。敵に触れるとミス！連続クリアでコンボ加点。
   </div>
 </div>
@@ -348,25 +430,50 @@
   }
 
   // ---- 入力 ----
-  let inputDir = null;
+  // タイトル/クリア/GO 画面での決定（Enter・タップ共通）
+  function handleConfirm() {
+    if (gameState === State.TITLE) startGame();
+    else if (gameState === State.CLEARED || gameState === State.GAMEOVER) gameState = State.TITLE;
+  }
+
   window.addEventListener("keydown", (ev) => {
     const k = ev.key.toLowerCase();
     keys[k] = true;
-    if ([" ", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(ev.key.toLowerCase())) ev.preventDefault();
+    if ([" ", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) ev.preventDefault();
 
-    if (gameState === State.TITLE) {
-      if (k === "enter" || k === " ") startGame();
-      return;
-    }
-    if (gameState === State.CLEARED || gameState === State.GAMEOVER) {
-      if (k === "enter" || k === " ") { gameState = State.TITLE; }
-      return;
-    }
     if (gameState === State.PLAYING) {
       if (k === "r") loadLevel(levelIndex);
+    } else if (k === "enter" || k === " ") {
+      handleConfirm();
     }
   });
   window.addEventListener("keyup", (ev) => { keys[ev.key.toLowerCase()] = false; });
+
+  // ---- タッチ操作（D-pad） ----
+  // 画面ボタンは既存の keys{} を直接叩くだけ。移動ロジックはそのまま再利用。
+  function bindHold(el, keyName) {
+    if (!el) return;
+    const on = (e) => { e.preventDefault(); keys[keyName] = true; el.classList.add("pressed"); };
+    const off = (e) => { e.preventDefault(); keys[keyName] = false; el.classList.remove("pressed"); };
+    el.addEventListener("pointerdown", on);
+    el.addEventListener("pointerup", off);
+    el.addEventListener("pointerleave", off);
+    el.addEventListener("pointercancel", off);
+  }
+  document.querySelectorAll(".pad-btn[data-key]").forEach(el => bindHold(el, el.dataset.key));
+
+  const restartBtn = document.getElementById("btn-restart");
+  if (restartBtn) {
+    restartBtn.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      if (gameState === State.PLAYING) loadLevel(levelIndex);
+    });
+  }
+
+  // タイトル/終了画面はキャンバスのタップで進める
+  canvas.addEventListener("pointerdown", (e) => {
+    if (gameState !== State.PLAYING) { e.preventDefault(); handleConfirm(); }
+  });
 
   function readDir() {
     if (keys["arrowup"] || keys["w"]) return { x: 0, y: -1 };
