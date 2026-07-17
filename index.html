@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Yagi - アクション倉庫番</title>
+<style>
+  :root {
+    --bg: #1a1420;
+    --panel: #241b2e;
+    --accent: #ffcf4a;
+    --accent2: #7ee787;
+    --danger: #ff6b6b;
+    --text: #f4eefb;
+    --muted: #b8a9cf;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: radial-gradient(circle at 50% 0%, #2b2138 0%, var(--bg) 70%);
+    color: var(--text);
+    font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #game-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 16px;
+  }
+  #hud {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+    max-width: 640px;
+  }
+  .stat {
+    background: var(--panel);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 8px 14px;
+    min-width: 92px;
+    text-align: center;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+  }
+  .stat .label {
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .stat .value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--accent);
+    line-height: 1.2;
+  }
+  #combo.hot .value { color: var(--danger); }
+  canvas {
+    background: #14101b;
+    border-radius: 14px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    max-width: 100%;
+    touch-action: none;
+  }
+  #hint {
+    color: var(--muted);
+    font-size: 13px;
+    text-align: center;
+    max-width: 640px;
+    line-height: 1.6;
+  }
+  kbd {
+    background: #37294a;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 5px;
+    padding: 1px 7px;
+    font-size: 12px;
+    color: var(--text);
+  }
+</style>
+</head>
+<body>
+<div id="game-wrap">
+  <div id="hud">
+    <div class="stat"><div class="label">ステージ</div><div class="value" id="stat-stage">1</div></div>
+    <div class="stat"><div class="label">スコア</div><div class="value" id="stat-score">0</div></div>
+    <div class="stat" id="combo"><div class="label">コンボ</div><div class="value" id="stat-combo">x1</div></div>
+    <div class="stat"><div class="label">ライフ</div><div class="value" id="stat-lives">♥♥♥</div></div>
+  </div>
+  <canvas id="canvas" width="640" height="480"></canvas>
+  <div id="hint">
+    <kbd>←↑↓→</kbd> / <kbd>WASD</kbd> 移動　<kbd>R</kbd> ステージやり直し　<kbd>Enter</kbd> / <kbd>Space</kbd> 決定<br>
+    箱（俵）を押してすべての目標に入れよう。ヤギは押しっぱなしで走れる。敵に触れるとミス！連続クリアでコンボ加点。
+  </div>
+</div>
+
+<script>
+"use strict";
+(function () {
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+
+  // ---- 定数 ----
+  const TILE = 48;                 // 1マスのピクセル
+  const MOVE_TIME = 0.14;          // プレイヤーが1マス移動する時間(秒)
+  const ENEMY_MOVE_TIME = 0.34;    // 敵が1マス移動する時間(秒)
+  const COMBO_WINDOW = 3.0;        // コンボ持続時間(秒)
+  const BASE_SCORE = 100;          // 箱を目標に入れた基本点
+
+  // ---- レベル定義 ----
+  // # 壁 / 空白 or . 床 / @ プレイヤー / $ 箱 / T 目標 / * 目標上の箱
+  // E 敵(左右往復) / V 敵(上下往復)
+  const LEVELS = [
+    [
+      "########",
+      "#@.....#",
+      "#..$...#",
+      "#...T..#",
+      "#......#",
+      "#..E...#",
+      "########",
+    ],
+    [
+      "##########",
+      "#@.......#",
+      "#..$..T..#",
+      "#........#",
+      "#..T..$..#",
+      "#...E....#",
+      "#........#",
+      "##########",
+    ],
+    [
+      "##########",
+      "#@...#...#",
+      "#.$..#.T.#",
+      "#....V...#",
+      "####.#.###",
+      "#T...$..E#",
+      "#........#",
+      "##########",
+    ],
+    [
+      "###########",
+      "#@..E.....#",
+      "#..$...$..#",
+      "#....V....#",
+      "#.T.....T.#",
+      "#..$...T..#",
+      "#....E..$.#",
+      "#.T.......#",
+      "###########",
+    ],
+  ];
+
+  // ---- ゲーム状態 ----
+  const State = { TITLE: "title", PLAYING: "playing", CLEARED: "cleared", GAMEOVER: "gameover" };
+  let gameState = State.TITLE;
+
+  let level = null;      // 現在レベルの解析結果
+  let levelIndex = 0;
+  let score = 0;
+  let lives = 3;
+  let combo = 0;         // 連鎖数(0=なし)
+  let comboTimer = 0;    // 残り秒
+  let floatTexts = [];   // 加点表示アニメ
+  let shakeTime = 0;     // 画面シェイク残り秒
+
+  const keys = {};       // 押下状態
+
+  // ---- レベル解析 ----
+  function parseLevel(rows) {
+    const walls = new Set();
+    const targets = [];
+    const boxes = [];
+    const enemies = [];
+    let player = null;
+    let cols = 0;
+    rows.forEach((row, y) => {
+      cols = Math.max(cols, row.length);
+      for (let x = 0; x < row.length; x++) {
+        const c = row[x];
+        if (c === "#") walls.add(key(x, y));
+        else if (c === "@") player = { x, y };
+        else if (c === "$") boxes.push({ x, y });
+        else if (c === "T") targets.push({ x, y });
+        else if (c === "*") { targets.push({ x, y }); boxes.push({ x, y }); }
+        else if (c === "E") enemies.push({ x, y, dir: { x: 1, y: 0 }, axis: "h" });
+        else if (c === "V") enemies.push({ x, y, dir: { x: 0, y: 1 }, axis: "v" });
+      }
+    });
+    return {
+      rows: rows.length,
+      cols,
+      walls,
+      targets,
+      // 描画/論理用の可変オブジェクト。renderPos は補間位置。
+      player: { gx: player.x, gy: player.y, rx: player.x, ry: player.y, moving: false, mt: 0, from: null, to: null, face: 1 },
+      boxes: boxes.map(b => ({ gx: b.x, gy: b.y, rx: b.x, ry: b.y, moving: false, mt: 0, from: null, to: null })),
+      enemies: enemies.map(e => ({ gx: e.x, gy: e.y, rx: e.x, ry: e.y, dir: { ...e.dir }, axis: e.axis, moving: false, mt: 0, from: null, to: null, cooldown: Math.random() * 0.3 })),
+    };
+  }
+
+  function key(x, y) { return x + "," + y; }
+
+  function loadLevel(idx) {
+    levelIndex = idx;
+    level = parseLevel(LEVELS[idx]);
+    combo = 0;
+    comboTimer = 0;
+    floatTexts = [];
+    resizeCanvas();
+    updateHud();
+  }
+
+  function resizeCanvas() {
+    const w = level.cols * TILE;
+    const h = level.rows * TILE;
+    canvas.width = w;
+    canvas.height = h;
+  }
+
+  // ---- 判定ヘルパ ----
+  function isWall(x, y) { return level.walls.has(key(x, y)); }
+  function boxAt(x, y) { return level.boxes.find(b => b.gx === x && b.gy === y); }
+  function enemyAt(x, y) { return level.enemies.find(e => e.gx === x && e.gy === y); }
+  function isTarget(x, y) { return level.targets.some(t => t.x === x && t.y === y); }
+
+  // ---- プレイヤー移動 ----
+  function tryMovePlayer(dx, dy) {
+    const p = level.player;
+    if (p.moving) return;
+    if (dx !== 0) p.face = dx > 0 ? 1 : -1;
+    const nx = p.gx + dx, ny = p.gy + dy;
+    if (isWall(nx, ny)) return;
+    const box = boxAt(nx, ny);
+    if (box) {
+      // 箱の先を確認
+      const bx = nx + dx, by = ny + dy;
+      if (isWall(bx, by) || boxAt(bx, by) || enemyAt(bx, by)) return;
+      // 箱を押す。グリッド位置は即確定するので、その場で加点判定する
+      startMove(box, bx, by);
+      checkBoxOnTarget(box);
+    }
+    startMove(p, nx, ny);
+  }
+
+  function startMove(obj, tx, ty) {
+    obj.from = { x: obj.gx, y: obj.gy };
+    obj.to = { x: tx, y: ty };
+    obj.gx = tx;
+    obj.gy = ty;
+    obj.moving = true;
+    obj.mt = 0;
+  }
+
+  // ---- 敵移動 ----
+  function updateEnemy(e, dt) {
+    if (e.moving) return;
+    e.cooldown -= dt;
+    if (e.cooldown > 0) return;
+    e.cooldown = ENEMY_MOVE_TIME;
+    let nx = e.gx + e.dir.x, ny = e.gy + e.dir.y;
+    // 進めなければ反転
+    if (isWall(nx, ny) || boxAt(nx, ny) || enemyAt(nx, ny)) {
+      e.dir.x *= -1; e.dir.y *= -1;
+      nx = e.gx + e.dir.x; ny = e.gy + e.dir.y;
+      if (isWall(nx, ny) || boxAt(nx, ny) || enemyAt(nx, ny)) return; // 完全に詰まり
+    }
+    startMove(e, nx, ny);
+  }
+
+  // ---- 移動アニメ更新 ----
+  function updateMover(obj, dt, moveTime) {
+    if (!obj.moving) return;
+    obj.mt += dt;
+    const t = Math.min(1, obj.mt / moveTime);
+    const e = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; // easeInOutQuad
+    obj.rx = obj.from.x + (obj.to.x - obj.from.x) * e;
+    obj.ry = obj.from.y + (obj.to.y - obj.from.y) * e;
+    if (t >= 1) {
+      obj.moving = false;
+      obj.rx = obj.gx;
+      obj.ry = obj.gy;
+    }
+  }
+
+  // ---- 箱が目標に乗ったかチェック（新規到達を得点化）----
+  function checkBoxOnTarget(box) {
+    if (box._scored && isTarget(box.gx, box.gy)) return;
+    if (isTarget(box.gx, box.gy) && !box._scored) {
+      box._scored = true;
+      addComboScore(box.gx, box.gy);
+    } else if (!isTarget(box.gx, box.gy) && box._scored) {
+      box._scored = false; // 目標から外れた
+    }
+  }
+
+  function addComboScore(gx, gy) {
+    combo += 1;
+    comboTimer = COMBO_WINDOW;
+    const mult = combo;
+    const gained = BASE_SCORE * mult;
+    score += gained;
+    floatTexts.push({
+      x: gx + 0.5, y: gy, text: "+" + gained + (mult > 1 ? " x" + mult : ""),
+      life: 1.0, vy: -1.2,
+    });
+    updateHud();
+  }
+
+  // ---- クリア判定 ----
+  function allBoxesOnTargets() {
+    return level.boxes.every(b => isTarget(b.gx, b.gy));
+  }
+
+  // ---- ミス処理 ----
+  function loseLife() {
+    lives -= 1;
+    shakeTime = 0.4;
+    combo = 0;
+    comboTimer = 0;
+    updateHud();
+    if (lives <= 0) {
+      gameState = State.GAMEOVER;
+    } else {
+      loadLevel(levelIndex); // 同ステージをリスタート
+    }
+  }
+
+  // ---- HUD ----
+  function updateHud() {
+    document.getElementById("stat-stage").textContent = (levelIndex + 1) + " / " + LEVELS.length;
+    document.getElementById("stat-score").textContent = score;
+    document.getElementById("stat-combo").textContent = "x" + Math.max(1, combo);
+    const comboEl = document.getElementById("combo");
+    if (combo >= 2) comboEl.classList.add("hot"); else comboEl.classList.remove("hot");
+    document.getElementById("stat-lives").textContent =
+      lives > 0 ? "♥".repeat(lives) : "—";
+  }
+
+  // ---- 入力 ----
+  let inputDir = null;
+  window.addEventListener("keydown", (ev) => {
+    const k = ev.key.toLowerCase();
+    keys[k] = true;
+    if ([" ", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(ev.key.toLowerCase())) ev.preventDefault();
+
+    if (gameState === State.TITLE) {
+      if (k === "enter" || k === " ") startGame();
+      return;
+    }
+    if (gameState === State.CLEARED || gameState === State.GAMEOVER) {
+      if (k === "enter" || k === " ") { gameState = State.TITLE; }
+      return;
+    }
+    if (gameState === State.PLAYING) {
+      if (k === "r") loadLevel(levelIndex);
+    }
+  });
+  window.addEventListener("keyup", (ev) => { keys[ev.key.toLowerCase()] = false; });
+
+  function readDir() {
+    if (keys["arrowup"] || keys["w"]) return { x: 0, y: -1 };
+    if (keys["arrowdown"] || keys["s"]) return { x: 0, y: 1 };
+    if (keys["arrowleft"] || keys["a"]) return { x: -1, y: 0 };
+    if (keys["arrowright"] || keys["d"]) return { x: 1, y: 0 };
+    return null;
+  }
+
+  function startGame() {
+    score = 0;
+    lives = 3;
+    gameState = State.PLAYING;
+    loadLevel(0);
+  }
+
+  function nextLevel() {
+    if (levelIndex + 1 < LEVELS.length) {
+      // クリアボーナス
+      score += 250;
+      loadLevel(levelIndex + 1);
+    } else {
+      score += 250 + lives * 200; // 最終ボーナス
+      gameState = State.CLEARED;
+      updateHud();
+    }
+  }
+
+  // ---- メインループ ----
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (gameState === State.PLAYING) update(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  function update(dt) {
+    const p = level.player;
+
+    // プレイヤー移動
+    updateMover(p, dt, MOVE_TIME);
+    if (!p.moving) {
+      const dir = readDir();
+      if (dir) tryMovePlayer(dir.x, dir.y);
+    }
+
+    // 箱アニメ + 得点チェック
+    level.boxes.forEach(b => {
+      const wasMoving = b.moving;
+      updateMover(b, dt, MOVE_TIME);
+      if (wasMoving && !b.moving) checkBoxOnTarget(b);
+    });
+    // 初期配置で目標上にある箱の判定
+    level.boxes.forEach(b => { if (b._scored === undefined) b._scored = isTarget(b.gx, b.gy); });
+
+    // 敵
+    level.enemies.forEach(e => {
+      updateEnemy(e, dt);
+      updateMover(e, dt, ENEMY_MOVE_TIME);
+    });
+
+    // 敵との接触判定（補間位置の距離で判定 = リアルタイム性）
+    for (const e of level.enemies) {
+      const dx = e.rx - p.rx, dy = e.ry - p.ry;
+      if (dx * dx + dy * dy < 0.45 * 0.45) { loseLife(); return; }
+    }
+
+    // コンボタイマー
+    if (comboTimer > 0) {
+      comboTimer -= dt;
+      if (comboTimer <= 0) { combo = 0; comboTimer = 0; updateHud(); }
+    }
+
+    // 加点表示
+    floatTexts.forEach(f => { f.y += f.vy * dt; f.life -= dt; });
+    floatTexts = floatTexts.filter(f => f.life > 0);
+
+    if (shakeTime > 0) shakeTime -= dt;
+
+    // クリア判定（箱のアニメが完了してから遷移）
+    if (allBoxesOnTargets() && level.boxes.every(b => !b.moving)) nextLevel();
+  }
+
+  // ---- 描画 ----
+  function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (gameState === State.TITLE) { drawTitle(); return; }
+    if (gameState === State.CLEARED) { drawBoard(); drawOverlay("🎉 ぜんステージ クリア！", "スコア: " + score, "Enter でタイトルへ"); return; }
+    if (gameState === State.GAMEOVER) { drawBoard(); drawOverlay("💥 ゲームオーバー", "スコア: " + score, "Enter でタイトルへ"); return; }
+
+    drawBoard();
+  }
+
+  function drawBoard() {
+    ctx.save();
+    if (shakeTime > 0) {
+      const s = shakeTime * 12;
+      ctx.translate((Math.random() - 0.5) * s, (Math.random() - 0.5) * s);
+    }
+
+    // 床グリッド
+    for (let y = 0; y < level.rows; y++) {
+      for (let x = 0; x < level.cols; x++) {
+        if (isWall(x, y)) {
+          drawWall(x, y);
+        } else {
+          ctx.fillStyle = (x + y) % 2 === 0 ? "#1d1728" : "#211a2d";
+          ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+        }
+      }
+    }
+    // 目標
+    level.targets.forEach(t => drawTarget(t.x, t.y));
+    // 箱
+    level.boxes.forEach(b => drawBox(b));
+    // 敵
+    level.enemies.forEach(e => drawEmoji(e.rx, e.ry, "👹"));
+    // プレイヤー
+    drawPlayer(level.player);
+
+    // 加点表示
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    floatTexts.forEach(f => {
+      ctx.globalAlpha = Math.max(0, f.life);
+      ctx.fillStyle = "#ffcf4a";
+      ctx.font = "bold 20px system-ui, sans-serif";
+      ctx.fillText(f.text, f.x * TILE, f.y * TILE);
+    });
+    ctx.globalAlpha = 1;
+
+    ctx.restore();
+  }
+
+  function drawWall(x, y) {
+    const px = x * TILE, py = y * TILE;
+    ctx.fillStyle = "#3a2c50";
+    ctx.fillRect(px, py, TILE, TILE);
+    ctx.fillStyle = "#4a3a63";
+    ctx.fillRect(px + 3, py + 3, TILE - 6, TILE - 6);
+    ctx.strokeStyle = "rgba(0,0,0,0.25)";
+    ctx.strokeRect(px + 0.5, py + 0.5, TILE - 1, TILE - 1);
+  }
+
+  function drawTarget(x, y) {
+    const cx = x * TILE + TILE / 2, cy = y * TILE + TILE / 2;
+    ctx.strokeStyle = "#7ee787";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, TILE * 0.28, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(126,231,135,0.18)";
+    ctx.fill();
+    ctx.lineWidth = 1;
+  }
+
+  function drawBox(b) {
+    const px = b.rx * TILE, py = b.ry * TILE;
+    const on = isTarget(b.gx, b.gy) && !b.moving;
+    const pad = 5;
+    ctx.fillStyle = on ? "#7ee787" : "#d9a441";
+    roundRect(px + pad, py + pad, TILE - pad * 2, TILE - pad * 2, 7);
+    ctx.fill();
+    ctx.fillStyle = on ? "#5bbf68" : "#b8842c";
+    // 俵の帯
+    ctx.fillRect(px + pad, py + TILE / 2 - 3, TILE - pad * 2, 6);
+    ctx.strokeStyle = "rgba(0,0,0,0.3)";
+    roundRect(px + pad, py + pad, TILE - pad * 2, TILE - pad * 2, 7);
+    ctx.stroke();
+  }
+
+  function drawPlayer(p) {
+    const cx = p.rx * TILE + TILE / 2;
+    const cy = p.ry * TILE + TILE / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(p.face, 1); // 向き反転
+    ctx.font = (TILE * 0.7) + "px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("🐐", 0, TILE * 0.04);
+    ctx.restore();
+  }
+
+  function drawEmoji(rx, ry, ch) {
+    ctx.font = (TILE * 0.66) + "px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(ch, rx * TILE + TILE / 2, ry * TILE + TILE / 2 + TILE * 0.04);
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawOverlay(title, sub, foot) {
+    ctx.fillStyle = "rgba(10,7,16,0.72)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffcf4a";
+    ctx.font = "bold 34px system-ui, sans-serif";
+    ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 30);
+    ctx.fillStyle = "#f4eefb";
+    ctx.font = "22px system-ui, sans-serif";
+    ctx.fillText(sub, canvas.width / 2, canvas.height / 2 + 12);
+    ctx.fillStyle = "#b8a9cf";
+    ctx.font = "16px system-ui, sans-serif";
+    ctx.fillText(foot, canvas.width / 2, canvas.height / 2 + 48);
+  }
+
+  function drawTitle() {
+    canvas.width = 640; canvas.height = 480;
+    ctx.fillStyle = "#14101b";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center";
+    ctx.font = "70px system-ui, sans-serif";
+    ctx.fillText("🐐", canvas.width / 2, 150);
+    ctx.fillStyle = "#ffcf4a";
+    ctx.font = "bold 46px system-ui, sans-serif";
+    ctx.fillText("Yagi", canvas.width / 2, 220);
+    ctx.fillStyle = "#f4eefb";
+    ctx.font = "20px system-ui, sans-serif";
+    ctx.fillText("アクション倉庫番", canvas.width / 2, 258);
+    ctx.fillStyle = "#b8a9cf";
+    ctx.font = "15px system-ui, sans-serif";
+    ctx.fillText("箱を目標へ運べ。敵を避けて、連続クリアでコンボ加点！", canvas.width / 2, 320);
+    ctx.fillStyle = "#7ee787";
+    ctx.font = "bold 22px system-ui, sans-serif";
+    ctx.fillText("Enter / Space でスタート", canvas.width / 2, 380);
+  }
+
+  // 起動
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
